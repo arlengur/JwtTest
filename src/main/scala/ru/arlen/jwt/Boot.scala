@@ -19,15 +19,16 @@ object Boot {
     val host = config.getString("default-conf.host")
     val port = config.getInt("default-conf.port")
     val secretKey = config.getString("default-conf.secretKey")
-    val tokenExpSec = config.getLong("default-conf.tokenExpSec")
+    val aTokenExpSec = config.getLong("default-conf.accessTokenExpSec")
+    val rTokenExpSec = config.getLong("default-conf.refreshTokenExpSec")
 
     val userRepository = new InMemoryUserRepository(Seq(
-      User("Bob", "pass1"),
-      User("John", "pass2"),
-      User("Mike", "pass3")
+      User(1, "Bob", "pass1"),
+      User(2, "John", "pass2"),
+      User(3, "Mike", "pass3")
     ))
 
-    val router = new JwtRouter(userRepository, secretKey, tokenExpSec)
+    val router = new JwtRouter(userRepository, secretKey, aTokenExpSec, rTokenExpSec)
     val server = Http().bindAndHandle(router.route, host, port)
 
     println(s"Server successfully bound at http://$host:$port\nPress RETURN to stop...")

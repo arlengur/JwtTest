@@ -3,8 +3,11 @@ package ru.arlen.jwt
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.model.headers.RawHeader
 import akka.http.scaladsl.server.{Directives, Route}
-import pdi.jwt.{Jwt, JwtAlgorithm, JwtClaim}
+import io.circe.Json
+import io.circe.parser._
+import pdi.jwt.{Jwt, JwtAlgorithm, JwtClaim, JwtTime}
 
+import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 trait Router {
@@ -13,7 +16,7 @@ trait Router {
 
 final case class LoginRequest(username: String, password: String)
 
-class JwtRouter(users: UserRepository, secretKey: String, tokenExp: Long) extends Router with Directives {
+class JwtRouter(users: UserRepository, secretKey: String, aTokenExp: Long, rTokenExp: Long) extends Router with Directives {
   // libraries for JSON encoding and decoding for our models
   import de.heikoseeberger.akkahttpcirce.FailFastCirceSupport._
   import io.circe.generic.auto._
@@ -21,16 +24,8 @@ class JwtRouter(users: UserRepository, secretKey: String, tokenExp: Long) extend
   override def route: Route =
     pathEndOrSingleSlash {
       post {
-        entity(as[User]) {
-          case User(name, pass) =>
-            onComplete(users.findUser(name, pass)) {
-              case Success(user) =>
-                val token = Jwt.encode(JwtClaim().issuedNow.expiresIn(tokenExp), secretKey, JwtAlgorithm.HS256)
-                respondWithHeader(RawHeader("Access-Token", token)) {
-                  complete(StatusCodes.OK)
-                }
-              case Failure(error) => complete(StatusCodes.NotFound->error.getMessage)
-            }
+        entity(as[LoginRequest]) {
+          case LoginRequest(name, pass) => getTokensForUser(users.find(name, pass))
           case _ => complete(StatusCodes.Forbidden)
         }
       } ~ get {
@@ -66,5 +61,43 @@ class JwtRouter(users: UserRepository, secretKey: String, tokenExp: Long) extend
           case None => complete(StatusCodes.Forbidden)
         }
       }
+    } ~ path("auth") {
+      post {
+        optionalHeaderValueByName("Refresh-Token") {
+          case Some(jwt) =>
+            Jwt.decodeRaw(jwt, secretKey, Seq(JwtAlgorithm.HS256)) match {
+              case Success(claims) =>
+                val jsonObject = parse(claims).getOrElse(Json.Null)
+                jsonObject.hcursor.get[Long]("iss") match {
+                  case Right(id) =>
+                    getTokensForUser(users.find(id, jwt))
+                  case Left(error) =>
+                    complete(StatusCodes.Unauthorized -> error.getMessage)
+                }
+              case Failure(error) =>
+                complete(StatusCodes.Unauthorized -> error.getMessage)
+            }
+          case None => complete(StatusCodes.Forbidden)
+        }
+      }
     }
+
+  private def getTokensForUser[T <: User](f: Future[T]): Route = {
+    onComplete(f) {
+      case Success(user) =>
+        val accessToken = Jwt.encode(JwtClaim().issuedNow.expiresIn(aTokenExp), secretKey, JwtAlgorithm.HS256)
+        val refreshToken = Jwt.encode(JwtClaim().by(user.id.toString).issuedNow.expiresIn(rTokenExp), secretKey, JwtAlgorithm.HS256)
+        onComplete(users.update(user.id, refreshToken)) {
+          case Success(_) =>
+            respondWithHeaders(
+              RawHeader("Access-Token", accessToken),
+              RawHeader("Refresh-Token", refreshToken),
+              RawHeader("Expires-In", (JwtTime.nowSeconds + rTokenExp).toString)) {
+              complete(StatusCodes.OK)
+            }
+          case Failure(error) => complete(StatusCodes.InternalServerError -> error.getMessage)
+        }
+      case Failure(error) => complete(StatusCodes.NotFound -> error.getMessage)
+    }
+  }
 }
